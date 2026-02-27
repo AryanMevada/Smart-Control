@@ -1,0 +1,366 @@
+import cv2
+from cvzone.HandTrackingModule import HandDetector
+from time import sleep
+import numpy as np
+import cvzone
+from pynput.keyboard import Controller
+import time
+import math
+
+class Button:
+    """Enhanced Button class with visual feedback states"""
+    def __init__(self, pos, text, size=[85, 85]):
+        self.pos = pos
+        self.size = size
+        self.text = text
+        self.clicked = False
+        self.click_time = 0
+        
+class VirtualKeyboard:
+    """Main Virtual Keyboard class with improved functionality"""
+    
+    def __init__(self, camera_index=0):
+        # Camera setup
+        self.cap = cv2.VideoCapture(camera_index)
+        self.cap.set(3, 1280)
+        self.cap.set(4, 720)
+        
+        # Check if camera opened successfully
+        if not self.cap.isOpened():
+            raise Exception(f"Cannot open camera {camera_index}")
+        
+        # Hand detector with improved settings
+        self.detector = HandDetector(detectionCon=0.8, maxHands=1)
+        
+        # Keyboard layout
+        self.keys = [
+            ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P"],
+            ["A", "S", "D", "F", "G", "H", "J", "K", "L", ";"],
+            ["Z", "X", "C", "V", "B", "N", "M", ",", ".", "/"]
+        ]
+        
+        # Special keys
+        self.special_keys = {
+            "SPACE": [50, 350, 300, 85],
+            "BACK": [370, 350, 150, 85],
+            "CLEAR": [540, 350, 150, 85]
+        }
+        
+        # Text and keyboard controller
+        self.finalText = ""
+        self.keyboard = Controller()
+        
+        # Button list
+        self.buttonList = []
+        self._create_buttons()
+        
+        # Click prevention
+        self.last_click_time = 0
+        self.click_delay = 0.25  # Reduced delay for better responsiveness
+        
+        # Distance threshold for click - INCREASED for easier clicking
+        self.click_threshold = 50  # Increased from 30
+        
+        # Hover state
+        self.current_hover = None
+        
+        # Debug mode
+        self.debug_distance = 0
+        
+    def _create_buttons(self):
+        """Create all keyboard buttons"""
+        # Regular letter keys
+        for i in range(len(self.keys)):
+            for j, key in enumerate(self.keys[i]):
+                self.buttonList.append(Button([100 * j + 50, 100 * i + 50], key))
+        
+        # Special keys
+        for key_name, (x, y, w, h) in self.special_keys.items():
+            self.buttonList.append(Button([x, y], key_name, [w, h]))
+    
+    def calculate_distance(self, point1, point2):
+        """Calculate Euclidean distance between two points"""
+        x1, y1 = point1
+        x2, y2 = point2
+        distance = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        return distance
+    
+    def draw_all(self, img, buttonList):
+        """Draw all buttons with enhanced visuals"""
+        for button in buttonList:
+            x, y = button.pos
+            w, h = button.size
+            
+            # Determine button color based on state
+            if button.clicked and (time.time() - button.click_time) < 0.3:
+                # Just clicked - green
+                color = (0, 255, 0)
+                text_color = (255, 255, 255)
+            elif button == self.current_hover:
+                # Hovering - purple highlight
+                color = (175, 0, 175)
+                text_color = (255, 255, 255)
+                # Draw hover border
+                cv2.rectangle(img, (x - 5, y - 5), (x + w + 5, y + h + 5), 
+                            (200, 0, 200), 3)
+            else:
+                # Normal state
+                color = (255, 0, 255)
+                text_color = (255, 255, 255)
+            
+            # Draw button background
+            cvzone.cornerRect(img, (x, y, w, h), 20, rt=0)
+            cv2.rectangle(img, button.pos, (x + w, y + h), color, cv2.FILLED)
+            
+            # Calculate text position for centering
+            font = cv2.FONT_HERSHEY_PLAIN
+            font_scale = 4 if len(button.text) == 1 else 2
+            text_size = cv2.getTextSize(button.text, font, font_scale, 4)[0]
+            text_x = x + (w - text_size[0]) // 2
+            text_y = y + (h + text_size[1]) // 2
+            
+            cv2.putText(img, button.text, (text_x, text_y),
+                       font, font_scale, text_color, 4)
+        
+        return img
+    
+    def draw_text_display(self, img):
+        """Draw the text display area with scrolling support"""
+        # Display background
+        cv2.rectangle(img, (50, 450), (1230, 550), (175, 0, 175), cv2.FILLED)
+        cv2.rectangle(img, (50, 450), (1230, 550), (255, 0, 255), 3)
+        
+        # Display text (show last 40 characters for scrolling effect)
+        display_text = self.finalText[-40:] if len(self.finalText) > 40 else self.finalText
+        cv2.putText(img, display_text, (60, 520),
+                   cv2.FONT_HERSHEY_PLAIN, 4, (255, 255, 255), 4)
+        
+        # Character count
+        count_text = f"Characters: {len(self.finalText)}"
+        cv2.putText(img, count_text, (60, 570),
+                   cv2.FONT_HERSHEY_PLAIN, 2, (255, 255, 255), 2)
+    
+    def draw_debug_info(self, img):
+        """Draw debug information"""
+        # Background for debug info
+        cv2.rectangle(img, (50, 600), (450, 700), (50, 50, 50), cv2.FILLED)
+        
+        # Distance info
+        distance_text = f"Distance: {int(self.debug_distance)}"
+        threshold_text = f"Threshold: {self.click_threshold}"
+        status_text = "CLICKING!" if self.debug_distance < self.click_threshold and self.debug_distance > 0 else "Waiting..."
+        
+        cv2.putText(img, distance_text, (60, 630),
+                   cv2.FONT_HERSHEY_PLAIN, 2, (255, 255, 255), 2)
+        cv2.putText(img, threshold_text, (60, 660),
+                   cv2.FONT_HERSHEY_PLAIN, 2, (255, 255, 255), 2)
+        
+        # Status color
+        status_color = (0, 255, 0) if self.debug_distance < self.click_threshold and self.debug_distance > 0 else (255, 255, 255)
+        cv2.putText(img, status_text, (60, 690),
+                   cv2.FONT_HERSHEY_PLAIN, 2, status_color, 2)
+    
+    def draw_instructions(self, img):
+        """Draw instructions on screen"""
+        instructions = [
+            "1. Point index finger at a key (purple highlight)",
+            "2. Bring index & middle fingers TOGETHER to click",
+            "3. Watch the distance indicator at bottom",
+            "4. Press 'q' to quit | 'd' for debug mode"
+        ]
+        
+        # Semi-transparent background
+        overlay = img.copy()
+        cv2.rectangle(overlay, (500, 600), (1230, 710), (50, 50, 50), cv2.FILLED)
+        cv2.addWeighted(overlay, 0.7, img, 0.3, 0, img)
+        
+        y_pos = 625
+        for instruction in instructions:
+            cv2.putText(img, instruction, (510, y_pos),
+                       cv2.FONT_HERSHEY_PLAIN, 1.3, (255, 255, 255), 2)
+            y_pos += 22
+    
+    def handle_special_key(self, key_name):
+        """Handle special key presses"""
+        try:
+            if key_name == "SPACE":
+                self.finalText += " "
+                self.keyboard.press(" ")
+            elif key_name == "BACK":
+                if self.finalText:
+                    self.finalText = self.finalText[:-1]
+                    self.keyboard.press('\b')
+            elif key_name == "CLEAR":
+                self.finalText = ""
+        except Exception as e:
+            print(f"Error handling special key {key_name}: {e}")
+    
+    def process_click(self, button, img):
+        """Process button click with visual feedback"""
+        current_time = time.time()
+        
+        # Check if enough time has passed since last click
+        if current_time - self.last_click_time < self.click_delay:
+            return
+        
+        try:
+            # Handle special keys
+            if button.text in self.special_keys:
+                self.handle_special_key(button.text)
+                print(f"Special key pressed: {button.text}")
+            else:
+                # Regular key press
+                self.keyboard.press(button.text)
+                self.finalText += button.text
+                print(f"Key pressed: {button.text}")
+            
+            # Update button state
+            button.clicked = True
+            button.click_time = current_time
+            self.last_click_time = current_time
+            
+        except Exception as e:
+            print(f"Error processing click for {button.text}: {e}")
+    
+    def run(self):
+        """Main loop for the virtual keyboard"""
+        print("=" * 60)
+        print("         VIRTUAL KEYBOARD WITH DEBUG MODE")
+        print("=" * 60)
+        print("Instructions:")
+        print("  1. Point with index finger to hover over keys")
+        print("  2. Bring index and middle fingers TOGETHER to click")
+        print("  3. Watch the distance indicator (bottom left)")
+        print("  4. Distance must be LESS than threshold to click")
+        print("  5. Press 'q' or ESC to quit")
+        print("=" * 60)
+        print()
+        
+        frame_count = 0
+        show_debug = True
+        
+        try:
+            while True:
+                success, img = self.cap.read()
+                
+                if not success:
+                    print("Failed to capture image from camera")
+                    break
+                
+                # Flip image for mirror effect (more natural interaction)
+                img = cv2.flip(img, 1)
+                
+                # Detect hands
+                hands, img = self.detector.findHands(img, flipType=False)
+                
+                # Draw all buttons
+                img = self.draw_all(img, self.buttonList)
+                
+                # Reset hover state and distance
+                self.current_hover = None
+                self.debug_distance = 0
+                
+                # Process hand detection
+                if hands:
+                    hand = hands[0]
+                    lmList = hand["lmList"]
+                    
+                    if lmList and len(lmList) > 12:  # Ensure we have enough landmarks
+                        # Get index finger tip position (landmark 8)
+                        index_x, index_y = lmList[8][0], lmList[8][1]
+                        
+                        # Get middle finger tip position (landmark 12)
+                        middle_x, middle_y = lmList[12][0], lmList[12][1]
+                        
+                        # Calculate distance between index and middle finger
+                        self.debug_distance = self.calculate_distance(
+                            (index_x, index_y), 
+                            (middle_x, middle_y)
+                        )
+                        
+                        # Draw line between fingers for visual feedback
+                        cv2.line(img, (index_x, index_y), (middle_x, middle_y), 
+                                (0, 255, 0) if self.debug_distance < self.click_threshold else (255, 0, 0), 3)
+                        
+                        # Draw circles on fingertips
+                        cv2.circle(img, (index_x, index_y), 15, (255, 0, 255), cv2.FILLED)
+                        cv2.circle(img, (middle_x, middle_y), 15, (255, 0, 255), cv2.FILLED)
+                        
+                        # Check each button for hover/click
+                        for button in self.buttonList:
+                            x, y = button.pos
+                            w, h = button.size
+                            
+                            # Check if finger is over button
+                            if x < index_x < x + w and y < index_y < y + h:
+                                self.current_hover = button
+                                
+                                # Check for click (pinch gesture)
+                                if self.debug_distance < self.click_threshold:
+                                    self.process_click(button, img)
+                                    sleep(0.15)  # Small delay for visual feedback
+                                
+                                break  # Only process one button at a time
+                
+                # Draw text display and instructions
+                self.draw_text_display(img)
+                self.draw_instructions(img)
+                
+                # Show debug info if enabled
+                if show_debug:
+                    self.draw_debug_info(img)
+                
+                # Display the image
+                cv2.imshow("Virtual Keyboard - Press 'q' to quit", img)
+                
+                # Check for quit
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q') or key == 27:  # 'q' or ESC
+                    print("\nQuitting...")
+                    break
+                elif key == ord('d'):  # Toggle debug mode
+                    show_debug = not show_debug
+                    print(f"Debug mode: {'ON' if show_debug else 'OFF'}")
+                    
+        except KeyboardInterrupt:
+            print("\nInterrupted by user")
+        except Exception as e:
+            print(f"\nError in main loop: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Cleanup
+            self.cap.release()
+            cv2.destroyAllWindows()
+            print("=" * 60)
+            print(f"Final text typed: '{self.finalText}'")
+            print("Virtual Keyboard closed successfully")
+            print("=" * 60)
+
+def main():
+    """Main entry point"""
+    try:
+        # Try camera index 0 first (default camera)
+        print("Attempting to open camera...")
+        vk = VirtualKeyboard(camera_index=0)
+        vk.run()
+    except Exception as e:
+        print(f"Error with camera 0: {e}")
+        print("\nTrying camera index 1...")
+        try:
+            vk = VirtualKeyboard(camera_index=1)
+            vk.run()
+        except Exception as e2:
+            print(f"Error with camera 1: {e2}")
+            print("\n" + "=" * 60)
+            print("ERROR: Could not access any camera!")
+            print("=" * 60)
+            print("Troubleshooting tips:")
+            print("1. Make sure your webcam is connected")
+            print("2. Check if another application is using the camera")
+            print("3. Try running: pip install opencv-python --upgrade")
+            print("4. Check camera permissions in your system settings")
+            print("=" * 60)
+
+if __name__ == "__main__":
+    main()
